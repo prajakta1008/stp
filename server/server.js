@@ -1,42 +1,89 @@
 const express = require("express");
-const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const cors = require("cors");
+const session = require('express-session');
 const dotenv = require("dotenv");
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const axios = require('axios');
-
-dotenv.config();
-
 const app = express();
+// ✅ Use the model
+const User = require('./models/User');
+const adminRoutes = require('./routes/admin');
+const authRoutes = require('./routes/auth');
+dotenv.config();
+const mongoose = require("mongoose");
+// ✅ Connect to MongoDB
+mongoose.connect('mongodb://localhost:27017/yourDB')
+  .then(() => console.log('MongoDB Connected'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+app.use('/api', adminRoutes);  
+app.use(express.static(path.join(__dirname, 'public'))); // or wherever your HTML files are
+
+
+// 🔒 CORS configuration (allowing both client and admin apps)
 app.use(express.json());
-app.use(cors());
+app.use(authRoutes);
 
-const PORT = process.env.PORT || 5000;
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://localhost:3001'], // Update with actual frontend URLs
+  credentials: true
+}));
+app.use(session({
+  secret: 'your_secret_key',
+  resave: false,
+  saveUninitialized: true
+}));
+app.use('/api/auth', require('./routes/auth')); 
+// Middlewares
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-    .then(() => console.log("MongoDB Connected"))
-    .catch(err => console.error("MongoDB connection error:", err)); // More descriptive error
+// Your routes
+app.use('/api/users', require('./routes/users'));
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/auth', authRoutes);
+app.use(session({
+  secret: 'your_secret_key',
+  resave: false,
+  saveUninitialized: true
+}));
 
-// User schema with watchlists
-const UserSchema = new mongoose.Schema({
-    username: { type: String, required: true, unique: true }, // Added validation
-    email: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    watchlists: {
-        type: [[String]],
-        default: [[], [], []],
-        validate: { // Basic validation for watchlist structure
-            validator: function(v) {
-                return v.length === 3 && v.every(Array.isArray);
-            },
-            message: props => `${props.value} is not a valid watchlist format! Expected a 2D array with 3 inner arrays.`
-        }
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(401).send("User not found");
     }
+
+    // If using plain passwords for now:
+    if (user.password !== password) {
+      return res.status(403).send("Incorrect password");
+    }
+
+    // Store session
+    req.session.user = {
+      id: user._id,
+      email: user.email,
+      role: user.role
+    };
+
+    // ✅ Redirect based on role
+    if (user.role === 'admin') {
+      return res.redirect('/admin');
+    } else {
+      return res.redirect('/portfolio');
+    }
+
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).send("Server error");
+  }
 });
-const User = mongoose.model("User", UserSchema);
 
 // Middleware to authenticate JWT
 const authenticate = async (req, res, next) => {
@@ -63,6 +110,22 @@ const authenticate = async (req, res, next) => {
         res.status(401).json({ message: "Invalid token." });
     }
 };
+function ensureAdmin(req, res, next) {
+  if (req.user && req.user.role === 'admin') {
+    return next();
+  } else {
+    return res.status(403).send('Access denied. Admins only.');
+  }
+}
+
+
+// ✅ Protect the admin route with the middleware
+
+app.get('/admin', (req, res) => {
+  const adminPath = path.join(__dirname, '../client/admin/admin.html');
+  console.log('Server is attempting to send file:', adminPath);
+  res.sendFile(adminPath);
+});
 
 // --- Authentication Routes ---
 // Sign-Up
@@ -415,6 +478,10 @@ app.get('/api/twelvedata/time_series/:symbol', authenticate, async (req, res) =>
 // --- Static File Serving (ensure this is placed after all API routes) ---
 // Serve static assets from the 'client' directory
 app.use(express.static(path.join(__dirname, "../client")));
+// Route: GET /admin -> serve client/admin/admin.html
+app.get(/^\/admin\/?$/, (req, res) => {
+  res.sendFile(path.join(__dirname, '../client/admin/admin.html'));
+});
 
 // Catch-all for HTML files (optional, but good for direct URL access, e.g., /Markets.html)
 app.get('/:pageName.html', (req, res) => {
@@ -429,12 +496,20 @@ app.get('/:pageName.html', (req, res) => {
         }
     });
 });
+// Special route to serve admin dashboard
+app.get('/admin.html', (req, res) => {
+    res.sendFile(path.join(__dirname, '../client/admin/admin.html'));
+});
 
 // Root route for the main page (e.g., when accessing http://localhost:5000/)
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/index.html')); // Assuming your login/entry point is index.html
+    res.sendFile(path.join(__dirname, '../client/index.html'));
 });
 
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 5000;
+// Start server only if run directly
+if (require.main === module) {
+  app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
-});
+  });
+}
